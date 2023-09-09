@@ -104,7 +104,7 @@ In order to do that:
 2. Enable any I/O registers needed for the interrupt (ex: `REG_DISPSTAT` for Hblank)
 3. Enable the appropriate bit in `REG_IE`.
 4. (Optional) Save your handler's address to `IRQHandler.<event>` (ex: `IRQHandler.hblank`).
-  * Note: If your handler is Thumb, then you should store the address + 1
+    * Note: If your handler is Thumb, then you should store the address + 1
 5. Enable interrupts by setting `REG_IME` to 1.
 
 You can see this in the demo, commented as `Step 5-8` in the code.
