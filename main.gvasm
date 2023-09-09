@@ -1,0 +1,184 @@
+//
+// gvirq - General purpose IRQ handler for GBA homebrew in assembly
+// by Sean Connelly (@velipso), https://sean.cm
+// Project Home: https://github.com/velipso/gvirq
+// SPDX-License-Identifier: 0BSD
+//
+
+.stdlib
+.import './src/irqInit.gvasm' { irqInit }
+.import './src/config.gvasm' { IRQHandler }
+
+.struct G = 0x02000000
+  .i32 color
+.end
+
+// GBA header
+.begin header
+  .arm
+  b main
+  .logo
+  .title "GVIRQ"
+  .str "CUNE77"
+  .i16 150, 0, 0, 0, 0
+  .i8 0 // version
+  .crc
+  .i16 0
+  b header // ensure ROM isn't interpetted as multi-boot
+  .str "SRAM_Vnnn"
+  .align 4
+.end
+
+// Step 1. Install irqHandler into IWRAM
+//
+// This should be in IWRAM so that it runs quickly, but that does
+// require the run-time to copy over the code (see below).
+.pool
+.align 4
+.begin iwramStart
+  // picking a base address for the code is important so it doesn't
+  // accidentally overlap with anything else
+  .def base = IRQHandler.end
+  .base base
+  .arm
+  .include './src/irqHandler.gvasm'
+  .pool
+  .align 4
+.end
+iwramEnd:
+
+// Step 2. Install irqInit into the ROM
+//
+// This doesn't need to be fast, since it only runs once.
+.include './src/irqInit.gvasm'
+
+.begin main
+  .arm
+  add   ip, pc, #1
+  bx    ip
+  .thumb
+
+  // disable LCD
+  ldr   r0, =REG_DISPCNT
+  ldr   r1, =0b0000_0000_1000_0000
+  strh  r1, [r0]
+
+  // set cartridge wait state for faster access
+  ldr   r0, =REG_WAITCNT
+  ldr   r1, =0x4317
+  strh  r1, [r0]
+
+  // Step 3. Copy code into IWRAM
+  //
+  // This loads irqHandler into IWRAM at run-time.
+  ldr   r0, =iwramStart.base
+  ldr   r1, =iwramStart
+  ldr   r2, =iwramEnd - iwramStart
+  bl    memcpy32
+
+  // Step 4. Initialize IRQ handlers
+  bl    irqInit
+
+  // Step 5. Disable interrupts while installing new handlers
+  ldr   r0, =REG_IME
+  movs  r1, #0
+  strb  r1, [r0]
+
+  // Step 6. Install any handlers you want
+  ldr   r0, =IRQHandler.hblank
+  ldr   r1, =irqHblank+1 // thumb code needs +1
+  str   r1, [r0]
+
+  // Step 7. Enable any interrupts you want
+  //
+  // In this example, we enable vblank + hblank
+  ldr   r0, =REG_DISPSTAT
+  movs  r1, #16 | 8
+  strh  r1, [r0]
+  ldr   r0, =REG_IE
+  ldrh  r1, [r0]
+  movs  r2, #2 | 1
+  orrs  r1, r2
+  strh  r1, [r0]
+
+  // Step 8. Enable interrupts again
+  ldr   r0, =REG_IME
+  movs  r1, #1
+  strb  r1, [r0]
+
+  // enable LCD
+  ldr   r0, =REG_DISPCNT
+  movs  r1, #0
+  strh  r1, [r0]
+
+  // cycle G.color slowly
+  movs  r4, #0
+- ldr   r0, =G.color
+  strx  r4, [r0] (G.color)
+  adds  r4, #1
+  // wait for vblank
+  swi   5
+  b     -
+  .pool
+.end
+
+.begin irqHblank
+  .thumb
+  // cycle G.color every scanline, setting palette entry 0
+  ldr   r0, =G.color
+  ldrx  r1, [r0] (G.color)
+  adds  r1, #1
+  strx  r1, [r0] (G.color)
+  ldr   r0, =0x05000000
+  strh  r1, [r0]
+  bx    lr
+  .pool
+.end
+
+.begin memcpy32 //(dest, source, byte count)
+  .thumb
+  .align 4, nop
+  bx    pc // change to ARM mode
+  nop
+arm:
+  .arm
+  subs  r2, #32
+  blt   last32
+  stmfd sp!, {r3-r10}
+chunk:
+  ldmia r1!, {r3-r10}
+  stmia r0!, {r3-r10}
+  subs  r2, #32
+  blt   done32
+  ldmia r1!, {r3-r10}
+  stmia r0!, {r3-r10}
+  subs  r2, #32
+  blt   done32
+  ldmia r1!, {r3-r10}
+  stmia r0!, {r3-r10}
+  subs  r2, #32
+  blt   done32
+  ldmia r1!, {r3-r10}
+  stmia r0!, {r3-r10}
+  subs  r2, #32
+  bge   chunk
+done32:
+  ldmfd sp!, {r3-r10}
+last32:
+  adds  r2, #32
+  bxle  lr
+last4:
+  subs  r2, #4
+  ldrge r12, [r1], #4
+  strge r12, [r0], #4
+  bgt   last4
+  bxeq  lr
+  add   r2, #4
+bytecopy:
+  ldrb  r12, [r1], #1
+  ldrb  r12, [r0], #1
+  subs  r2, #1
+  bgt   bytecopy
+  bx    lr
+  .pool
+.end
